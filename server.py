@@ -14,9 +14,9 @@ server_name = os.getenv("MCP_SERVER_NAME", "Calculator")
 
 # Create an MCP server
 mcp = FastMCP(
-    name="Calculator",
-    host="0.0.0.0",  # only used for SSE transport (localhost)
-    port=8050,  # only used for SSE transport (set this to any port)
+    name=server_name,
+    host=host,  # only used for SSE transport (localhost)
+    port=port,  # only used for SSE transport (set this to any port)
     stateless_http=True,
 )
 
@@ -52,20 +52,22 @@ if __name__ == "__main__":
         default=env_transport, # Use env variable as default
         help="Transport Protocol to use"
     )
+    parser.add_argument("--port", type=int, default=port, help="Port for HTTP transports")
 
     args = parser.parse_args()
 
-    # Command line argument takes precedence over env variables 
-    transport = args.transport
+    # Get final values (command line overrides environment)
+    final_transport = args.transport
+    final_port = args.port
 
-    if transport == "stdio":
-        print("Running server with stdio transport")
+    # Update the server configuration
+    mcp.port = final_port
+
+    if final_transport == "stdio":
         mcp.run(transport="stdio")
-    elif transport == "sse":
-        print("Running server with SSE transport")
+    elif final_transport == "sse":
         mcp.run(transport="sse")
-    elif transport == "streamable-http":
-        print("Running server with Streamable HTTP transport")
+    elif final_transport == "streamable-http":
         mcp.run(transport="streamable-http")
     else:
-        raise ValueError(f"Unknown transport: {transport}")
+        raise ValueError(f"Unknown transport: {final_transport}")
