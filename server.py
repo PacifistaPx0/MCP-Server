@@ -11,7 +11,7 @@ load_dotenv(".env")
 env_transport = os.getenv("MCP_TRANSPORT", "stdio")
 host = os.getenv("MCP_HOST", "0.0.0.0")
 port = int(os.getenv("MCP_PORT", "8050"))
-server_name = os.getenv("MCP_SERVER_NAME", "Calculator")
+server_name = os.getenv("MCP_SERVER_NAME", "Test_Server")
 
 # Create an MCP server
 mcp = FastMCP(
@@ -29,7 +29,7 @@ def get_knowledge_base() -> str:
         A formatted string containing all Q&A from the knowledge base
     """
     try:
-        kb_path = os.path.join(os.path.dirname(__file__), "data", "kb.json")
+        kb_path = os.path.join(os.path.dirname(__file__), "openAI-integration/data", "kb.json")
         with open(kb_path, "r") as f:
             kb_data = json.load(f)
 
@@ -99,6 +99,8 @@ if __name__ == "__main__":
 
     # Update the server configuration
     mcp.port = final_port
+
+    print(f"this is the final transport -- {final_transport}")
 
     if final_transport == "stdio":
         mcp.run(transport="stdio")
