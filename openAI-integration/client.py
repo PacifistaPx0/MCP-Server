@@ -4,7 +4,9 @@ from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 import os
 
+import tiktoken #for counting tokens used
 import nest_asyncio
+import openai
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -20,7 +22,7 @@ load_dotenv("../.env")
 class MCPOpenAIClient:
     """Client for interacting with OpenAI models using MCP tools."""
 
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-4o", api_key: str = None):
         """Initialize the OpenAI MCP client.
 
         Args:
@@ -29,10 +31,14 @@ class MCPOpenAIClient:
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
-        self.openai_client = AsyncOpenAI()
+        self.openai_client = AsyncOpenAI(api_key=api_key)
         self.model = model
         self.stdio: Optional[Any] = None
         self.write: Optional[Any] = None
+
+    def count_tokens(self, text: str) -> int:
+        """Count tokens in text."""
+        return len(self.encoding.encode(text))
 
     async def connect_to_server(self, server_script_path: str = "../server.py"):
         """Connect to an MCP server.
@@ -103,13 +109,36 @@ class MCPOpenAIClient:
         # Get available tools
         tools = await self.get_mcp_tools()
 
-        # Initial OpenAI API call
-        response = await self.openai_client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": query}],
-            tools=tools,
-            tool_choice="auto",
-        )
+        # Count input tokens
+        input_tokens = self.count_tokens(query)
+        tools_tokens = self.count_tokens(json.dumps(tools))
+
+        print(f"Input tokens: {input_tokens}")
+        print(f"Tools tokens: {tools_tokens}")
+
+        # Validate API key before making call
+        if not self.openai_client.api_key:
+            return "Error: No OpenAI API key provided. Please set the OPENAI_API_KEY environment variable or provide it when initializing the client."
+            
+        try:
+            # Initial OpenAI API call
+            response = await self.openai_client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": query}],
+                tools=tools,
+                tool_choice="auto",
+            )
+            
+            if hasattr(response, 'usage'):
+                total_tokens = response.usage.total_tokens
+                self.total_tokens_used += total_tokens
+                print(f"API call used: {total_tokens} tokens")
+                print(f"Total tokens used so far: {self.total_tokens_used}")
+
+        except openai.RateLimitError:
+            raise  # Re-raise to be handled by the main function
+        except Exception as e:
+            return f"Error calling OpenAI API: {str(e)}"
 
         # Get assistant's response
         assistant_message = response.choices[0].message
@@ -159,15 +188,24 @@ class MCPOpenAIClient:
 
 async def main():
     """Main entry point for the client."""
-    client = MCPOpenAIClient()
+    client = MCPOpenAIClient(api_key=os.getenv("OPENAI_API_KEY"))
     await client.connect_to_server("../server.py")
+    try:
+        # Example: Ask about company vacation policy
+        query = "What is our company's vacation policy?"
+        print(f"\nQuery: {query}")
 
-    # Example: Ask about company vacation policy
-    query = "What is our company's vacation policy?"
-    print(f"\nQuery: {query}")
-
-    response = await client.process_query(query)
-    print(f"\nResponse: {response}")
+        response = await client.process_query(query)
+        print(f"\nResponse: {response}")
+    except openai.RateLimitError as e:
+        print(f"\nERROR: OpenAI API rate limit exceeded.")
+        print("This usually means your API key has insufficient quota or billing issues.")
+        print("Visit https://platform.openai.com/account/billing to check your billing status.")
+        print(f"\nError details: {e}")
+    except Exception as e:
+        print(f"\nERROR: An error occurred: {e}")
+    finally:
+        await client.cleanup()
 
 
 if __name__ == "__main__":
