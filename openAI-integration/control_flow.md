@@ -1,20 +1,20 @@
-# MCP-OpenAI Client Control Flow
+# MCP-Gemini Client Control Flow
 
 ## Overview
-This document explains how the `client.py` file works, tracing the execution flow from initialization to query processing using MCP (Model Context Protocol) tools with OpenAI.
+This document explains how the `client.py` file works, tracing the execution flow from initialization to query processing using MCP (Model Context Protocol) tools with Google Gemini AI.
 
 ## High-Level Architecture
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   User Query    │    │  MCP Server     │    │   OpenAI API    │
-│                 │    │  (server.py)    │    │                 │
+│   User Query    │    │  MCP Server     │    │  Gemini API     │
+│                 │    │  (server.py)    │    │  (Google AI)    │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          │                       │                       │
          ▼                       │                       │
 ┌─────────────────┐              │                       │
 │  client.py      │◄─────────────┼───────────────────────┤
-│ MCPOpenAIClient │              │                       │
+│ MCPGenAIClient  │              │                       │
 └─────────────────┘              │                       │
          │                       │                       │
          └───────────────────────┼───────────────────────┘
@@ -30,18 +30,20 @@ This document explains how the `client.py` file works, tracing the execution flo
 ### 1. Initialization Phase
 
 ```python
-class MCPOpenAIClient:
-    def __init__(self, model: str = "gpt-4o"):
+class MCPGenAIClient:
+    def __init__(self, model: str = "gemini-2.0-flash"):
 ```
 
 **Flow:**
-1. **Class Instantiation** → Creates MCPOpenAIClient instance
+1. **Class Instantiation** → Creates MCPGenAIClient instance
 2. **Initialize Variables**:
    - `session: Optional[ClientSession] = None` → Will hold MCP session
    - `exit_stack = AsyncExitStack()` → Manages async cleanup
-   - `openai_client = AsyncOpenAI()` → OpenAI API client
-   - `model = model` → GPT model to use (default: gpt-4o)
+   - `client = genai.Client()` → Google Gemini API client
+   - `model = model` → Gemini model to use (default: gemini-2.0-flash)
    - `stdio/write = None` → Will hold server communication streams
+   - `total_tokens_used = 0` → Token usage tracking
+   - `encoding = tiktoken.encoding_for_model("gpt-4")` → Token counting (approximation)
 
 ### 2. Server Connection Phase
 
@@ -69,6 +71,7 @@ graph TD
    server_params = StdioServerParameters(
        command="python",
        args=[server_script_path],  # "server.py"
+       creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
    )
    ```
 
@@ -77,10 +80,14 @@ graph TD
    stdio_transport = await self.exit_stack.enter_async_context(
        stdio_client(server_params)
    )
+   # Store reference to server process for cleanup
+   if hasattr(stdio_transport, '_process'):
+       server_process = stdio_transport._process
    ```
    - Spawns `python server.py` as subprocess
    - Establishes stdio communication pipes
    - Managed by exit_stack for cleanup
+   - Stores process reference for signal handling
 
 3. **Session Creation**:
    ```python
@@ -113,8 +120,8 @@ graph TD
     D --> E[Return tool definitions]
     
     subgraph "Tool Transformation"
-        F[MCP Tool Format] --> G[OpenAI Function Format]
-        G --> H["type: function"]
+        F[MCP Tool Format] --> G[Gemini Function Format]
+        G --> H["function_declarations"]
         H --> I["function.name"]
         I --> J["function.description"] 
         J --> K["function.parameters"]
@@ -129,15 +136,14 @@ graph TD
   tool.inputSchema = {...}
   ```
 
-- **Output (OpenAI format)**:
+- **Output (Gemini format)**:
   ```python
   {
-      "type": "function",
-      "function": {
+      "function_declarations": [{
           "name": "get_knowledge_base",
-          "description": "Retrieve entire knowledge base as string",
+          "description": "Retrieve entire knowledge base as string. Use this tool to retrieve company information and policies.",
           "parameters": {...}
-      }
+      }]
   }
   ```
 
@@ -151,7 +157,7 @@ async def process_query(self, query: str) -> str:
 ```mermaid
 graph TD
     A[User Query Input] --> B[Get MCP Tools]
-    B --> C[Send to OpenAI with tools]
+    B --> C[Send to Gemini with tools]
     C --> D{Tool Calls Present?}
     
     D -->|No| E[Return Direct Response]
@@ -159,8 +165,8 @@ graph TD
     
     F --> G[Execute MCP Tool]
     G --> H[Get Tool Result]
-    H --> I[Add to Conversation]
-    I --> J[Send Updated Messages to OpenAI]
+    H --> I[Create Enhanced Query]
+    I --> J[Send to Gemini with Context]
     J --> K[Return Final Response]
     
     subgraph "Tool Execution Details"
@@ -172,52 +178,57 @@ graph TD
 
 **Detailed Steps:**
 
-1. **Initial OpenAI Call**:
+1. **Initial Gemini Call**:
    ```python
-   response = await self.openai_client.chat.completions.create(
+   response = await self.client.aio.models.generate_content(
        model=self.model,
-       messages=[{"role": "user", "content": query}],
-       tools=tools,
-       tool_choice="auto",
+       contents=contents,
+       config=genai.types.GenerateContentConfig(
+           tools=tools,
+           temperature=0.1,
+       )
    )
    ```
-   - Sends user query to OpenAI
+   - Sends user query to Gemini with system instruction
    - Includes available MCP tools
-   - OpenAI decides if tools are needed
+   - Gemini decides if tools are needed
 
-2. **Message History Setup**:
+2. **System Instruction & Context**:
    ```python
-   messages = [
-       {"role": "user", "content": query},
-       assistant_message,
+   system_instruction = """You are a helpful assistant with access to company knowledge base tools. 
+   When asked about company policies, procedures, or information, you MUST use the available tools to retrieve the most current information.
+   Always use the get_knowledge_base tool when answering questions about company policies."""
+   
+   contents = [
+       {"role": "user", "parts": [{"text": f"{system_instruction}\n\nUser question: {query}"}]}
    ]
    ```
 
 3. **Tool Call Processing** (if present):
    ```python
-   for tool_call in assistant_message.tool_calls:
-       result = await self.session.call_tool(
-           tool_call.function.name,          # "get_knowledge_base"
-           arguments=json.loads(tool_call.function.arguments),
-       )
+   for part in candidate.content.parts:
+       if hasattr(part, 'function_call') and part.function_call:
+           result = await self.session.call_tool(
+               part.function_call.name,          # "get_knowledge_base"
+               arguments=dict(part.function_call.args),
+           )
    ```
 
-4. **Tool Result Integration**:
+4. **Enhanced Query Creation**:
    ```python
-   messages.append({
-       "role": "tool",
-       "tool_call_id": tool_call.id,
-       "content": result.content[0].text,  # KB content
-   })
+   final_query = f"""Original question: {query}
+
+Knowledge base information retrieved:
+{result.content[0].text}
+
+Based on this information from our company knowledge base, please provide a comprehensive answer to the original question."""
    ```
 
-5. **Final OpenAI Call**:
+5. **Final Gemini Call**:
    ```python
-   final_response = await self.openai_client.chat.completions.create(
+   final_response = await self.client.aio.models.generate_content(
        model=self.model,
-       messages=messages,
-       tools=tools,
-       tool_choice="none",  # No more tool calls
+       contents=final_query
    )
    ```
 
@@ -229,21 +240,21 @@ graph TD
 sequenceDiagram
     participant U as User
     participant C as Client
-    participant O as OpenAI
+    participant G as Gemini
     participant M as MCP Server
     participant K as kb.json
 
     U->>C: "What is our company's vacation policy?"
     C->>C: get_mcp_tools()
-    C->>O: Chat completion with tools
-    O->>C: Tool call: get_knowledge_base()
+    C->>G: generate_content with tools & system instruction
+    G->>C: Tool call: get_knowledge_base()
     C->>M: session.call_tool("get_knowledge_base")
     M->>K: Read kb.json file
     K->>M: Return JSON data
     M->>M: Format as Q&A text
     M->>C: Return formatted knowledge base
-    C->>O: Chat completion with tool result
-    O->>C: Final answer about vacation policy
+    C->>G: Enhanced query with tool result
+    G->>C: Final answer about vacation policy
     C->>U: "Full-time employees are entitled to 20 paid vacation days..."
 ```
 
@@ -256,9 +267,34 @@ async def cleanup(self):
 
 **Flow:**
 - Closes MCP session
-- Terminates server subprocess
+- Terminates server subprocess with signal handling
 - Cleans up stdio streams
 - Releases all async resources
+- Handles graceful and force termination
+
+## Signal Handling
+
+```python
+def signal_handler(signum, frame):
+    """Handle Ctrl+C gracefully."""
+    print(f"\n🛑 Received interrupt signal ({signum}). Shutting down...")
+    
+    global server_process
+    if server_process:
+        try:
+            server_process.terminate()
+            server_process.wait(timeout=5)
+        except Exception:
+            server_process.kill()
+    
+    sys.exit(0)
+```
+
+**Features:**
+- Proper Ctrl+C handling
+- Graceful server process termination
+- Force kill as fallback
+- Cross-platform signal handling
 
 ## Key Components Integration
 
@@ -272,37 +308,48 @@ async def cleanup(self):
 - Manages JSON-RPC message exchange
 - Provides tool discovery and execution
 
-### 3. **AsyncOpenAI**
-- Handles OpenAI API communication
-- Manages conversation context
-- Processes tool calls and responses
+### 3. **Google GenAI Client**
+- Handles Gemini API communication
+- Manages content generation with tools
+- Processes function calls and responses
+- Supports async operations via `aio.models.generate_content`
 
 ### 4. **StdioServerParameters**
 - Configures server subprocess
 - Sets up communication pipes
 - Defines server startup command
+- Includes Windows-specific process flags
+
+### 5. **Token Counting (tiktoken)**
+- Approximates Gemini token usage using GPT-4 encoding
+- Tracks total tokens used across requests
+- Provides cost estimation capabilities
 
 ## Error Handling Points
 
 1. **Server Connection**: If `python server.py` fails
 2. **Tool Discovery**: If MCP tools unavailable
-3. **OpenAI API**: Rate limits, API errors
+3. **Gemini API**: Rate limits, API errors, quota issues
 4. **Tool Execution**: MCP server errors
 5. **JSON Parsing**: Malformed tool arguments
+6. **Signal Handling**: Process interruption and cleanup
+7. **API Key**: Missing or invalid GOOGLE_API_KEY
 
 ## Performance Characteristics
 
 - **Initialization**: One-time server startup cost
 - **Tool Discovery**: Cached after first call
-- **Query Processing**: 2 OpenAI API calls if tools used
+- **Query Processing**: 2 Gemini API calls if tools used
 - **Tool Execution**: Direct MCP server communication
-- **Cleanup**: Graceful resource termination
+- **Cleanup**: Graceful resource termination with signal handling
+- **Token Counting**: Approximated using tiktoken (GPT-4 encoding)
+- **Memory Usage**: Efficient with AsyncExitStack management
 
 ## Usage Pattern
 
 ```python
 # 1. Create client
-client = MCPOpenAIClient()
+client = MCPGenAIClient(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # 2. Connect to MCP server
 await client.connect_to_server("server.py")
@@ -314,4 +361,22 @@ response = await client.process_query("Your question here")
 await client.cleanup()
 ```
 
-This architecture enables seamless integration between OpenAI's language models and custom MCP tools, allowing AI to access and process structured knowledge bases dynamically.
+## Key Differences from OpenAI Implementation
+
+### **API Format:**
+- **OpenAI**: `chat.completions.create()` with `messages` array
+- **Gemini**: `aio.models.generate_content()` with `contents` object
+
+### **Tool Format:**
+- **OpenAI**: `{"type": "function", "function": {...}}`
+- **Gemini**: `{"function_declarations": [{...}]}`
+
+### **Response Handling:**
+- **OpenAI**: `response.choices[0].message.tool_calls`
+- **Gemini**: `response.candidates[0].content.parts[].function_call`
+
+### **Final Response:**
+- **OpenAI**: Conversation-based with role continuity
+- **Gemini**: Enhanced query approach with context injection
+
+This architecture enables seamless integration between Google Gemini models and custom MCP tools, allowing AI to access and process structured knowledge bases dynamically with improved token efficiency and cost-effectiveness.
