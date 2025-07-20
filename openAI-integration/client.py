@@ -6,11 +6,12 @@ import os
 import signal
 import sys
 import subprocess
+import atexit
 
 import tiktoken #for counting tokens used
 import nest_asyncio
 
-from dotenv import load_dotenv
+from decouple import config
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from google import genai
@@ -19,41 +20,42 @@ from google import genai
 # Apply nest_asyncio to allow nested event loops (needed for Jupyter/IPython)
 nest_asyncio.apply()
 
-# Load environment variables
-load_dotenv("../.env")
-
 # Global variable to track server process
 server_process = None
 
-def signal_handler(signum, frame):
-    """Handle Ctrl+C gracefully."""
-    print(f"\n🛑 Received interrupt signal ({signum}). Shutting down...")
-    
-    # Kill server process if it exists
+# Function to kill server on exit
+def kill_server_on_exit():
     global server_process
     if server_process:
         try:
-            print("Terminating server process...")
+            print("🧹 Terminating server process...")
             server_process.terminate()
-            server_process.wait(timeout=5)
-            print("✓ Server process terminated")
-        except Exception as e:
-            print(f"Force killing server process: {e}")
-            server_process.kill()
-    
-    print("Goodbye!")
-    sys.exit(0)
+        except:
+            try:
+                print("⚠️ Force killing server process...")
+                server_process.kill()
+            except:
+                pass
 
-# Register signal handlers
+# Register cleanup function to run on exit
+atexit.register(kill_server_on_exit)
+
+# Signal handler for Ctrl+C
+def signal_handler(sig, frame):
+    print("\n🛑 Interrupted by Ctrl+C. Exiting...")
+    kill_server_on_exit()
+    os._exit(0)  # Force exit
+
+# Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
-if hasattr(signal, 'SIGTERM'):
-    signal.signal(signal.SIGTERM, signal_handler)
+
+
 
 
 class MCPGenAIClient:
     """Client for interacting with GenAI models using MCP tools."""
 
-    def __init__(self, model: str = "gemini-2.0-flash", api_key: str = None):
+    def __init__(self, model: str = "gemini-2.0-flash"):
         """Initialize the GenAI MCP client.
 
         Args:
@@ -69,7 +71,7 @@ class MCPGenAIClient:
         self.total_tokens_used = 0
         
         # Store the API key for validation
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.api_key = config('GOOGLE_API_KEY', default=None)
 
         # Configure GenAI client 
         self.client = genai.Client(api_key=self.api_key)
@@ -208,8 +210,13 @@ class MCPGenAIClient:
                                 function_name,
                                 arguments=function_args
                             )
+
+                            # debugging
+                            print(f"result: '\n' {result.content[0].text} '\n'")
                             
-                            print(f"✓ Tool result: {result.content[0].text[:100]}...")
+                            question_line = result.content[0].text.split('\n')[0]  # Get only the first line with Q1
+                            question_text = question_line.split(":", 1)[1].strip() if ":" in question_line else question_line
+                            print(f"✓ Tool result: {question_text}")
                             
                             final_query = f"""Original question: {query}
 
@@ -232,36 +239,27 @@ Based on this information from our company knowledge base, please provide a comp
             return f"Error calling GenAI API: {str(e)}"
             
     async def cleanup(self):
-        """Clean up resources."""
-        global server_process
+        """Clean up resources properly."""
         print("🧹 Cleaning up resources...")
         
         try:
+            # Cancel pending tasks
+            for task in asyncio.all_tasks():
+                if task != asyncio.current_task():
+                    task.cancel()
+                    
+            # Close the exit stack to release resources
             await self.exit_stack.aclose()
         except Exception as e:
             print(f"Error during cleanup: {e}")
-        
-        # Ensure server process is terminated
-        if server_process:
-            try:
-                print("Terminating server process...")
-                server_process.terminate()
-                await asyncio.sleep(1)  # Give it time to terminate gracefully
-                if server_process.poll() is None:  # Still running
-                    print("Force killing server process...")
-                    server_process.kill()
-                print("✓ Server process cleaned up")
-            except Exception as e:
-                print(f"Error terminating server process: {e}")
 
 
 async def main():
     """Main entry point for the client."""
     client = None
-    
     try:
+        client = MCPGenAIClient()
         print("🚀 Starting MCP GenAI Client...")
-        client = MCPGenAIClient(api_key=os.getenv("GOOGLE_API_KEY"))
         await client.connect_to_server("../server.py")
         
         # Example: Ask about company vacation policy
@@ -270,29 +268,29 @@ async def main():
 
         response = await client.process_query(query)
         print(f"\nResponse: {response}")
-        
-    except KeyboardInterrupt:
-        print("\n🛑 Program interrupted by user (Ctrl+C)")
-    except Exception as e:
-        print(f"\n❌ ERROR: An error occurred: {e}")
     finally:
         if client:
-            await client.cleanup()
-        print("👋 Program ended")
-
+            print("👋 Explicitly cleaning up client...")
+            try:
+                # Add explicit cleanup
+                await client.cleanup()
+                # Pause to let cleanup complete
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+            # Force kill server at the end
+            kill_server_on_exit()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Program interrupted during startup")
+        print("\n🛑 Program interrupted by Ctrl+C")
     except Exception as e:
-        print(f"💥 Fatal error: {e}")
+        print(f"💥 Error: {e}")
     finally:
-        # Final cleanup
-        if server_process:
-            try:
-                server_process.kill()
-            except:
-                pass
-        print("🏁 Cleanup complete")
+        # Double-ensure cleanup runs
+        kill_server_on_exit()
+        # Force exit to terminate any hanging resources
+        print("🏁 Force exiting...")
+        os._exit(0)  # More reliable than sys.exit()
