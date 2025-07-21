@@ -1,7 +1,7 @@
 # MCP-Gemini Client Control Flow
 
 ## Overview
-This document explains how the `client.py` file works, tracing the execution flow from initialization to query processing using MCP (Model Context Protocol) tools with Google Gemini AI.
+This document explains how the `client.py` file works, tracing the execution flow from initialization to query processing using MCP (Model Context Protocol) tools with Google Gemini AI. It includes details on the improved question matching algorithm that accurately identifies the most relevant knowledge base sections based on user queries.
 
 ## High-Level Architecture
 
@@ -165,7 +165,8 @@ graph TD
     
     F --> G[Execute MCP Tool]
     G --> H[Get Tool Result]
-    H --> I[Create Enhanced Query]
+    H --> H2[Match Best Question]
+    H2 --> I[Create Enhanced Query]
     I --> J[Send to Gemini with Context]
     J --> K[Return Final Response]
     
@@ -173,6 +174,12 @@ graph TD
         G1[session.call_tool] --> G2[MCP Server Processing]
         G2 --> G3[Knowledge Base Lookup]
         G3 --> G4[Return Formatted Result]
+    end
+    
+    subgraph "Question Matching Algorithm"
+        H2A[Extract Questions] --> H2B[Clean & Normalize Text]
+        H2B --> H2C[Calculate Word Overlap]
+        H2C --> H2D[Find Highest Score]
     end
 ```
 
@@ -214,7 +221,22 @@ graph TD
            )
    ```
 
-4. **Enhanced Query Creation**:
+4. **Question Matching Algorithm**:
+   ```python
+   # get question
+   kb_text = result.content[0].text
+   best_q_num, question_text = find_matching_question(kb_text, query)
+   print(f"✓ Most relevant question (Q{best_q_num}): {question_text}")
+   ```
+
+   The improved matching algorithm works by:
+   - Extracting all questions from the knowledge base
+   - Cleaning both user query and questions (removing punctuation)
+   - Converting to lowercase for case-insensitive matching
+   - Calculating word overlap scores between query and each question
+   - Identifying the question with the highest matching score
+
+5. **Enhanced Query Creation**:
    ```python
    final_query = f"""Original question: {query}
 
@@ -224,7 +246,7 @@ Knowledge base information retrieved:
 Based on this information from our company knowledge base, please provide a comprehensive answer to the original question."""
    ```
 
-5. **Final Gemini Call**:
+6. **Final Gemini Call**:
    ```python
    final_response = await self.client.aio.models.generate_content(
        model=self.model,
@@ -253,9 +275,45 @@ sequenceDiagram
     K->>M: Return JSON data
     M->>M: Format as Q&A text
     M->>C: Return formatted knowledge base
+    C->>C: find_matching_question(kb_text, query)
+    C->>C: Calculate word overlap scores
+    C->>C: Identify best matching question (Q1)
     C->>G: Enhanced query with tool result
     G->>C: Final answer about vacation policy
     C->>U: "Full-time employees are entitled to 20 paid vacation days..."
+```
+
+**Query Example 2**: "How can I submit a report on expenses?"
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as Client
+    participant G as Gemini
+    participant M as MCP Server
+    participant K as kb.json
+
+    U->>C: "How can I submit a report on expenses?"
+    C->>C: get_mcp_tools()
+    C->>G: generate_content with tools & system instruction
+    G->>C: Tool call: get_knowledge_base()
+    C->>M: session.call_tool("get_knowledge_base")
+    M->>K: Read kb.json file
+    K->>M: Return JSON data
+    M->>M: Format as Q&A text
+    M->>C: Return formatted knowledge base
+    C->>C: find_matching_question(kb_text, query)
+    C->>C: Clean & normalize text (remove punctuation)
+    C->>C: Calculate word overlap scores
+    Note over C: DEBUG Q1 Score: 0, Matching: set()
+    Note over C: DEBUG Q2 Score: 0, Matching: set()
+    Note over C: DEBUG Q3 Score: 0, Matching: set()
+    Note over C: DEBUG Q4 Score: 3, Matching: {'report', 'expense', 'submit'}
+    Note over C: DEBUG Q5 Score: 1, Matching: {'report'}
+    C->>C: Identify best matching question (Q4)
+    C->>G: Enhanced query with tool result
+    G->>C: Final answer about expense reports
+    C->>U: "Expense reports should be submitted through the company's expense management system..."
 ```
 
 ### 6. Resource Cleanup
@@ -308,19 +366,26 @@ def signal_handler(signum, frame):
 - Manages JSON-RPC message exchange
 - Provides tool discovery and execution
 
-### 3. **Google GenAI Client**
+### 3. **Text Matching Algorithm**
+- Uses regex for question extraction
+- Implements word overlap scoring for question matching
+- Removes punctuation and normalizes text for better matching
+- Debug output for matching scores
+- Efficiently identifies most relevant knowledge base sections
+
+### 4. **Google GenAI Client**
 - Handles Gemini API communication
 - Manages content generation with tools
 - Processes function calls and responses
 - Supports async operations via `aio.models.generate_content`
 
-### 4. **StdioServerParameters**
+### 5. **StdioServerParameters**
 - Configures server subprocess
 - Sets up communication pipes
 - Defines server startup command
 - Includes Windows-specific process flags
 
-### 5. **Token Counting (tiktoken)**
+### 6. **Token Counting (tiktoken)**
 - Approximates Gemini token usage using GPT-4 encoding
 - Tracks total tokens used across requests
 - Provides cost estimation capabilities
