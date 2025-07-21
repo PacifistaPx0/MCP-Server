@@ -7,6 +7,7 @@ import signal
 import sys
 import subprocess
 import atexit
+import re
 
 import tiktoken #for counting tokens used
 import nest_asyncio
@@ -22,6 +23,46 @@ nest_asyncio.apply()
 
 # Global variable to track server process
 server_process = None
+
+# Function to extract question using regex
+def get_question(kb_text, q_num=1):
+    """Extract a specific question from the knowledge base text.
+    
+    Args:
+        kb_text: The knowledge base text
+        q_num: The question number to extract (default: 1)
+    
+    Returns:
+        The question text or None if not found
+    """
+    pattern = rf'Q{q_num}:\s*(.*?)(?=\n[A-Z]\d+:|$)'
+    match = re.search(pattern, kb_text, re.DOTALL)
+    return match.group(1).strip() if match else None
+
+def find_matching_question(kb_text, user_query):
+    """ Find the most relevant question in the knowledge base for the user query """
+    # Extract all questions
+    all_questions = {}
+    for i in range(1, 10): # Assuming max 9 questions
+        q_text = get_question(kb_text, i)
+        if q_text:
+            all_questions[i] = q_text
+        else:
+            break 
+
+    # Simple matching based on word overlap
+    user_words = set(user_query.lower().split())
+    best_match = 1 # Default to Q1
+    highest_score = 0
+
+    for q_num, q_text in all_questions.items():
+        q_words = set(q_text.lower().split())
+        score = len(user_words.intersection(q_words))
+        if score > highest_score:
+            highest_score = score
+            best_match = q_num
+
+    return best_match, all_questions[best_match]
 
 # Function to kill server on exit
 def kill_server_on_exit():
@@ -210,20 +251,20 @@ class MCPGenAIClient:
                                 function_name,
                                 arguments=function_args
                             )
-
-                            # debugging
-                            print(f"result: '\n' {result.content[0].text} '\n'")
                             
-                            question_line = result.content[0].text.split('\n')[0]  # Get only the first line with Q1
-                            question_text = question_line.split(":", 1)[1].strip() if ":" in question_line else question_line
-                            print(f"✓ Tool result: {question_text}")
+                            # get question
+                            kb_text = result.content[0].text
+                            best_q_num, question_text = find_matching_question(kb_text, query)
+                            print(f"✓ Most relevant question (Q{best_q_num}): {question_text}")
                             
                             final_query = f"""Original question: {query}
 
 Knowledge base information retrieved:
 {result.content[0].text}
 
-Based on this information from our company knowledge base, please provide a comprehensive answer to the original question."""
+Based on this information from our company knowledge base, please provide a comprehensive answer to the original question.
+
+FORMAT YOUR RESPONSE WITH EACH STATEMENT ON A NEW LINE AND USE CLEAR LANGUAGE."""
 
                             final_response = await self.client.aio.models.generate_content(
                                 model=self.model,
@@ -262,24 +303,23 @@ async def main():
         print("🚀 Starting MCP GenAI Client...")
         await client.connect_to_server("../server.py")
         
-        # Example: Ask about company vacation policy
-        query = "What is our company's vacation policy?"
+        # Clear, single query
+        query = "How can I submit a report on expenses?"
         print(f"\nQuery: {query}")
 
+        # Single call to process_query
         response = await client.process_query(query)
         print(f"\nResponse: {response}")
+        
+    except Exception as e:
+        print(f"❌ Main error: {e}")
     finally:
         if client:
-            print("👋 Explicitly cleaning up client...")
-            try:
-                # Add explicit cleanup
-                await client.cleanup()
-                # Pause to let cleanup complete
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                print(f"Cleanup error: {e}")
-            # Force kill server at the end
-            kill_server_on_exit()
+            await client.cleanup()
+            # Short pause to allow cleanup to complete
+            await asyncio.sleep(0.2)
+        # Only call once
+        kill_server_on_exit()
 
 if __name__ == "__main__":
     try:
