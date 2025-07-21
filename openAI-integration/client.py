@@ -40,28 +40,36 @@ def get_question(kb_text, q_num=1):
     return match.group(1).strip() if match else None
 
 def find_matching_question(kb_text, user_query):
-    """ Find the most relevant question in the knowledge base for the user query """
-    # Extract all questions
+    """Find the most relevant question in the knowledge base for the user query."""
+    # Extract all questions first
     all_questions = {}
-    for i in range(1, 10): # Assuming max 9 questions
+    for i in range(1, 10):  # Assuming max 9 questions
         q_text = get_question(kb_text, i)
         if q_text:
             all_questions[i] = q_text
         else:
-            break 
-
-    # Simple matching based on word overlap
-    user_words = set(user_query.lower().split())
-    best_match = 1 # Default to Q1
+            break  # No more questions
+    
+    # Clean and normalize query - remove punctuation
+    clean_query = re.sub(r'[^\w\s]', '', user_query.lower())
+    user_words = set(clean_query.split())
+    
+    best_match = 1  # Default to Q1
     highest_score = 0
-
+    
     for q_num, q_text in all_questions.items():
-        q_words = set(q_text.lower().split())
-        score = len(user_words.intersection(q_words))
+        # Clean and normalize question - remove punctuation
+        clean_q_text = re.sub(r'[^\w\s]', '', q_text.lower())
+        q_words = set(clean_q_text.split())
+        
+        # Calculate score based on word overlap
+        matching_words = user_words.intersection(q_words)
+        score = len(matching_words)
+        
         if score > highest_score:
             highest_score = score
             best_match = q_num
-
+    
     return best_match, all_questions[best_match]
 
 # Function to kill server on exit
@@ -89,8 +97,6 @@ def signal_handler(sig, frame):
 
 # Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
-
-
 
 
 class MCPGenAIClient:

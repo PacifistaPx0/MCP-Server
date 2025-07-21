@@ -29,9 +29,16 @@ def get_question(kb_text, q_num=1):
     return match.group(1).strip() if match else None
 
 def score_question(query, question_text):
-    """Score a question based on word overlap with query."""
-    user_words = set(query.lower().split())
-    q_words = set(question_text.lower().split())
+    """Score a question with punctuation handling."""
+    # Remove punctuation and normalize
+    clean_query = re.sub(r'[^\w\s]', '', query.lower())
+    clean_question = re.sub(r'[^\w\s]', '', question_text.lower())
+    
+    # Split into words
+    user_words = set(clean_query.split())
+    q_words = set(clean_question.split())
+    
+    # Find matching words
     matching_words = user_words.intersection(q_words)
     return len(matching_words), matching_words
 
@@ -71,14 +78,20 @@ def find_matching_question(kb_text, user_query):
             all_questions[i] = q_text
         else:
             break
-            
-    user_words = set(user_query.lower().split())
+    
+    # clean user query
+    user_query = re.sub(r'[^\w\s]', '', user_query.lower())
+    user_words = set(user_query.split())
+
     best_match = 1
     highest_score = 0
     
     for q_num, q_text in all_questions.items():
-        q_words = set(q_text.lower().split())
-        score = len(user_words.intersection(q_words))
+        # clean question text
+        q_text = re.sub(r'[^\w\s]', '', q_text.lower())
+        q_words = set(q_text.split())
+
+        score = len(user_words.intersection(q_words)) # intersectionreturns set of matching words
         if score > highest_score:
             highest_score = score
             best_match = q_num
